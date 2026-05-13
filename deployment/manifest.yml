@@ -22,7 +22,7 @@ spec:
   container:
     name: agent-api
     # TODO: This should be updated by the CD pipeline
-    image_tag: "latest"
+    image_tag: "99b435932fedad5d7915fd3fee70f8a288b5c552"
     port: 8080
     
     env:
@@ -44,3 +44,4 @@ spec:
 # -------------------------------------------------------------
 # | (will be populated by CD pipeline)  |
 # -------------------------------------------------------------
+| 2026-05-13T06:10:11Z | 99b435932fedad5d7915fd3fee70f8a288b5c552 | github-actions |
