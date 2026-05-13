@@ -11,13 +11,111 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/ci-cd]
   pull_request:
     branches: [main]
 
 jobs:
-  # TODO: Design and implement your pipeline
-  placeholder:
+  # -------------------------------------------------------
+  # Lint: catch obvious Python errors before building
+  # -------------------------------------------------------
+  lint:
     runs-on: ubuntu-latest
     steps:
-      - run: exit 1
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install linter
+        run: pip install flake8
+
+      - name: Lint agent-api
+        # E261/E266: comment style, W293: trailing whitespace — cosmetic only.
+        # Keeping lint focused on real errors: syntax, undefined names, unused imports.
+        run: flake8 agent-api/app.py --max-line-length=120 --extend-ignore=E261,E266,W293
+
+  # -------------------------------------------------------
+  # Build: verify Docker image builds successfully.
+  # Prevents merging code that breaks the container build.
+  # -------------------------------------------------------
+  build:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Build agent-api image
+        env:
+          DOCKER_BUILDKIT: 0
+        run: docker build -t agent-api:${{ github.sha }} agent-api/
+
+  # -------------------------------------------------------
+  # Eval: run the eval suite as a quality gate.
+  # Blocks merge if golden accuracy < 90% or adversarial
+  # rejection rate < 60%. Ensures prompt regressions are
+  # caught before reaching production.
+  # -------------------------------------------------------
+  eval:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start agent-api
+        run: |
+          docker compose up -d agent-api
+          sleep 5
+
+      - name: Wait for API to be healthy
+        run: |
+          for i in {1..10}; do
+            curl -sf http://localhost:8080/healthz && break
+            sleep 3
+          done
+
+      - name: Run eval suite
+        # eval-runner has `profiles: [eval]` in docker-compose.yml.
+        # Must activate the profile explicitly or compose run will refuse to start it.
+        run: docker compose --profile eval run --rm eval-runner
+
+      - name: Upload eval results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results-${{ github.sha }}
+          path: eval-results/
+
+      - name: Stop stack
+        if: always()
+        run: docker compose down
+
+  # -------------------------------------------------------
+  # Deploy: only runs on push to main (not on PRs).
+  # Updates deployment/manifest.yml with the commit SHA so
+  # every deployment is traceable back to a specific commit.
+  # -------------------------------------------------------
+  deploy:
+    runs-on: ubuntu-latest
+    needs: eval
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update deployment manifest with commit SHA
+        run: |
+          sed -i 's|image_tag: ".*"|image_tag: "${{ github.sha }}"|' deployment/manifest.yml
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          sed -i "s|# | (will be populated by CD pipeline)  ||" deployment/manifest.yml
+          echo "| $TIMESTAMP | ${{ github.sha }} | github-actions |" >> deployment/manifest.yml
+
+      - name: Commit manifest update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add deployment/manifest.yml
+          git commit -m "chore(deploy): update image_tag to ${{ github.sha }}"
+          git push
