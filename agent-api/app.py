@@ -2,8 +2,7 @@ import os
 import re
 import time
 from flask import Flask, request, jsonify
-from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
-
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST, Gauge
 app = Flask(__name__)
 
 PROMPT_VERSION = os.environ.get('PROMPT_VERSION', 'v1.0.0')
@@ -17,6 +16,34 @@ REQUEST_COUNT = Counter(
 
 # TODO: How would you track rejection metrics for observability?
 # Consider: What information would operators need when debugging rejection spikes?
+
+# Tracks rejected requests by reason (prompt_injection, secrets_request, dangerous_action).
+# Separate from REQUEST_COUNT so operators can alert and graph rejections independently.
+REJECTION_COUNT = Counter(
+    'agent_rejections_total', # 1. metric name
+    'Total number of rejected requests by reason', # 2. help text (shows in /metrics)
+    ['prompt_version', 'reason'] # 3. labels
+)
+
+# Tracks active concurrent requests at any given moment.
+# Spikes here combined with latency spikes = server under stress.
+# Drops to zero unexpectedly = traffic generator died or upstream issue.
+IN_FLIGHT_REQUESTS = Gauge(
+    'agent_in_flight_requests',
+    'Number of requests currently being processed'
+)
+
+# Tracks HTTP error responses by status code.
+# 400s = bad client requests (e.g. missing message field).
+# 500s = server-side bugs — should never happen in normal operation.
+# Lets operators distinguish noisy clients from real application failures.
+ERROR_COUNT = Counter(
+    'agent_errors_total',
+    'Total number of error responses',
+    ['prompt_version', 'status_code']
+)
+
+## ----------------
 
 REQUEST_LATENCY = Histogram(
     'agent_request_latency_seconds',
@@ -98,10 +125,15 @@ def ask():
     start_time = time.time()
     
     REQUEST_COUNT.labels(prompt_version=PROMPT_VERSION, route='/ask').inc()
+    IN_FLIGHT_REQUESTS.inc()  # increment when request enters
     
     try:
         data = request.get_json()
         if not data or 'message' not in data:
+            # Increase 'REJECTION_COUNT' for invalid request
+            REJECTION_COUNT.labels(prompt_version=PROMPT_VERSION, reason='invalid_request').inc()
+            ERROR_COUNT.labels(prompt_version=PROMPT_VERSION, status_code='400').inc()
+            # -----
             return jsonify({
                 'error': 'Missing required field: message',
                 'rejected': True,
@@ -115,6 +147,8 @@ def ask():
         
         if rejected:
             # TODO: Implement rejection tracking here
+            REJECTION_COUNT.labels(prompt_version=PROMPT_VERSION, reason=reason).inc()
+            # ------
             response = {
                 'rejected': True,
                 'reason': reason,
@@ -132,6 +166,7 @@ def ask():
         return jsonify(response), 200
     
     finally:
+        IN_FLIGHT_REQUESTS.dec()  # decrement when request exits, even on error
         latency = time.time() - start_time
         REQUEST_LATENCY.labels(prompt_version=PROMPT_VERSION, route='/ask').observe(latency)
 
