@@ -109,7 +109,6 @@ jobs:
         run: |
           sed -i 's|image_tag: ".*"|image_tag: "${{ github.sha }}"|' deployment/manifest.yml
           TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          sed -i "s|# | (will be populated by CD pipeline)  ||" deployment/manifest.yml
           echo "| $TIMESTAMP | ${{ github.sha }} | github-actions |" >> deployment/manifest.yml
 
       - name: Commit manifest update
