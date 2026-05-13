@@ -10,28 +10,71 @@ groups:
           summary: "Agent API is down"
           description: "The agent API has been unreachable for more than 1 minute."
 
-      # TODO: Implement alerting for abnormal rejection rates
-      # Consider: What rejection rate is "normal" for this system?
-      #           How do you distinguish a real problem from noise?
-      # 
-      # Observe the running system before setting thresholds.
+      # Normal traffic mix is ~15% rejection (REJECTION_MIX_RATIO=0.15).
+      # Threshold set at 30% — 2x normal — sustained for 5m to avoid noise
+      # from short bursts. Indicates a real shift in traffic pattern or
+      # a misconfigured prompt version.
       - alert: HighRejectionRate
-        expr: vector(0) > 1
+        expr: |
+          (
+            rate(agent_rejections_total[5m])
+            /
+            rate(agent_requests_total{route="/ask"}[5m])
+          ) > 0.30
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "TODO"
-          description: "TODO"
+          summary: "Rejection rate above 30% for 5 minutes"
+          description: "Rejection rate is {{ $value | humanizePercentage }}. Normal baseline is ~15%. Investigate by reason: sum by(reason)(rate(agent_rejections_total[5m]))"
 
-      # TODO: Implement alerting for sudden changes in rejection behavior
-      # Consider: What constitutes a "spike" vs normal variance?
-      #           How do you compare current behavior to baseline?
+      # Compares current 5m rate against the 1h rolling baseline.
+      # Fires when current rate is 2x the recent average — catches sudden
+      # spikes even if absolute rate is still below 30%.
+      # 'for: 5m' filters out single-scrape blips.
       - alert: RejectionRateSpike
-        expr: vector(0) > 1
+        expr: |
+          (
+            rate(agent_rejections_total[5m])
+            /
+            rate(agent_requests_total{route="/ask"}[5m])
+          )
+          /
+          (
+            rate(agent_rejections_total[1h])
+            /
+            rate(agent_requests_total{route="/ask"}[1h])
+          ) > 2
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "TODO"
-          description: "TODO"
+          summary: "Rejection rate spiked 2x above 1h baseline"
+          description: "Rejection rate has doubled compared to the 1-hour average. Check if a new prompt version was deployed or if traffic pattern changed."
+
+      # p95 latency above 500ms sustained for 5m indicates the API is
+      # struggling. This is a fast API (no real LLM calls), so 500ms
+      # is a generous threshold — anything above this is abnormal.
+      - alert: HighRequestLatency
+        expr: |
+          histogram_quantile(0.95,
+            rate(agent_request_latency_seconds_bucket{route="/ask"}[5m])
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 latency above 500ms"
+          description: "p95 request latency is {{ $value | humanizeDuration }}. Check agent_in_flight_requests for concurrency buildup."
+
+      # If request rate drops to near zero, the traffic generator likely died
+      # or something upstream broke. Silent failures are worse than loud ones.
+      - alert: NoIncomingTraffic
+        expr: |
+          rate(agent_requests_total{route="/ask"}[5m]) < 0.1
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No traffic reaching the Agent API"
+          description: "Request rate has dropped below 0.1 req/s for 3 minutes. Check traffic generator and upstream routing."
